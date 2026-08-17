@@ -7,7 +7,7 @@ from io import BytesIO
 
 from PIL import Image
 import qrcode
-from pyzbar.pyzbar import decode
+import zxingcpp
 
 import aiosqlite
 from aiogram import Bot, Dispatcher, F
@@ -28,7 +28,7 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN topilmadi! .env faylini tekshiring.")
+    raise ValueError("BOT_TOKEN topilmadi!")
 
 DB_NAME = os.getenv("DB_NAME", "qr_toolbox.sqlite3")
 MAX_PHOTO_SIZE = 5_000_000  # 5 MB
@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 MAIN_MENU_TEXTS = {"🔲 QR Yaratish", "📷 QR Skanerlash", "⚙️ Sozlamalar"}
 
 # ==========================================
-# 2. DATABASE (async, bloklamaydigan)
+# 2. DATABASE (async)
 # ==========================================
 async def init_db():
     async with aiosqlite.connect(DB_NAME) as conn:
@@ -52,7 +52,6 @@ async def init_db():
         )
         await conn.commit()
 
-
 async def get_color(user_id: int) -> str:
     async with aiosqlite.connect(DB_NAME) as conn:
         cursor = await conn.execute(
@@ -60,7 +59,6 @@ async def get_color(user_id: int) -> str:
         )
         row = await cursor.fetchone()
         return row[0] if row else 'black'
-
 
 async def update_color(user_id: int, color: str) -> None:
     if color not in ALLOWED_COLORS:
@@ -72,9 +70,7 @@ async def update_color(user_id: int, color: str) -> None:
         )
         await conn.commit()
 
-
 async def ensure_user(user_id: int) -> None:
-    """Foydalanuvchini bazaga qo'shadi, agar mavjud bo'lmasa (default rang bilan)."""
     async with aiosqlite.connect(DB_NAME) as conn:
         await conn.execute(
             'INSERT OR IGNORE INTO users (user_id, color) VALUES (?, ?)',
@@ -88,9 +84,7 @@ async def ensure_user(user_id: int) -> None:
 class QRState(StatesGroup):
     waiting_for_data = State()
 
-
 URL_PATTERN = re.compile(r'^(?:http|ftp)s?://', re.IGNORECASE)
-
 
 def format_warning(url: str) -> str:
     safe_url = html.escape(url)
@@ -107,13 +101,11 @@ def format_warning(url: str) -> str:
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
-
 def main_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="🔲 QR Yaratish"), KeyboardButton(text="📷 QR Skanerlash")],
         [KeyboardButton(text="⚙️ Sozlamalar")]
     ], resize_keyboard=True)
-
 
 @dp.message(CommandStart())
 async def start_cmd(message: Message, state: FSMContext):
@@ -124,12 +116,10 @@ async def start_cmd(message: Message, state: FSMContext):
         reply_markup=main_menu_kb()
     )
 
-
 @dp.message(Command("cancel"))
 async def cancel_cmd(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Bekor qilindi.", reply_markup=main_menu_kb())
-
 
 @dp.message(F.text == "⚙️ Sozlamalar")
 async def settings_cmd(message: Message, state: FSMContext):
@@ -142,7 +132,6 @@ async def settings_cmd(message: Message, state: FSMContext):
     ])
     await message.answer("QR-kod rangini tanlang:", reply_markup=kb)
 
-
 @dp.callback_query(F.data.startswith("color_"))
 async def set_color_cb(call: CallbackQuery):
     color = call.data.split("_", 1)[1]
@@ -153,7 +142,6 @@ async def set_color_cb(call: CallbackQuery):
     await call.message.edit_text(f"✅ Rangi o'zgartirildi: {color.upper()}")
     await call.answer()
 
-
 @dp.message(F.text == "🔲 QR Yaratish")
 async def generate_prompt(message: Message, state: FSMContext):
     await state.set_state(QRState.waiting_for_data)
@@ -162,10 +150,8 @@ async def generate_prompt(message: Message, state: FSMContext):
         "Bekor qilish uchun /cancel yozing."
     )
 
-
 @dp.message(QRState.waiting_for_data)
 async def generate_qr(message: Message, state: FSMContext):
-    # Menyu tugmalaridan biri bosilgan bo'lsa - state'ni tozalab, o'sha handlerga yo'l qo'yamiz
     if message.text in MAIN_MENU_TEXTS:
         await state.clear()
         if message.text == "🔲 QR Yaratish":
@@ -205,11 +191,9 @@ async def generate_qr(message: Message, state: FSMContext):
     finally:
         await state.clear()
 
-
 @dp.message(F.text == "📷 QR Skanerlash")
 async def scan_prompt(message: Message):
     await message.answer("Skanerlash uchun QR-kod rasmini yuboring.")
-
 
 @dp.message(F.photo)
 async def scan_qr(message: Message):
@@ -224,13 +208,13 @@ async def scan_qr(message: Message):
         downloaded = await bot.download_file(file.file_path)
 
         image = Image.open(BytesIO(downloaded.read()))
-        decoded = decode(image)
+        results = zxingcpp.read_barcodes(image)
 
-        if not decoded:
+        if not results:
             await message.answer("❌ Rasmdan QR-kod topilmadi. Aniqroq rasm yuboring.")
             return
 
-        result = decoded[0].data.decode('utf-8', errors='replace')
+        result = results[0].text
 
         if URL_PATTERN.match(result):
             await message.answer(format_warning(result))
@@ -242,8 +226,6 @@ async def scan_qr(message: Message):
         logger.exception("QR skanerlashda xatolik")
         await message.answer("❌ O'qish jarayonida xatolik yuz berdi.")
 
-
-# Kutilmagan xabar turlari uchun (stiker, ovoz, va h.k.) - foydalanuvchi "qotib qolmasligi" uchun
 @dp.message()
 async def fallback_handler(message: Message):
     await message.answer(
@@ -258,7 +240,6 @@ async def main():
     await init_db()
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
