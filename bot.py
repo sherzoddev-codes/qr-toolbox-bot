@@ -4,6 +4,7 @@ import html
 import asyncio
 import logging
 from io import BytesIO
+import inspect
 
 from PIL import Image
 import qrcode
@@ -14,7 +15,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
-    BufferedInputFile, ReplyKeyboardMarkup, KeyboardButton
+    BufferedInputFile, InputFile, ReplyKeyboardMarkup, KeyboardButton
 )
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
@@ -172,7 +173,8 @@ async def generate_qr(message: Message, state: FSMContext):
     color = await get_color(message.from_user.id)
 
     try:
-        qr = qrcode.QRCode(version=1, box_size=10, border=4)
+        # Make QR generation flexible (don't fix version to 1)
+        qr = qrcode.QRCode(box_size=10, border=4)
         qr.add_data(message.text)
         qr.make(fit=True)
         img = qr.make_image(fill_color=color, back_color="white")
@@ -181,8 +183,16 @@ async def generate_qr(message: Message, state: FSMContext):
         img.save(buffer, format="PNG")
         buffer.seek(0)
 
+        # Try BufferedInputFile first, fall back to InputFile
+        try:
+            buffer.seek(0)
+            input_file = BufferedInputFile(buffer.read(), filename="qr.png")
+        except Exception:
+            buffer.seek(0)
+            input_file = InputFile(buffer, filename="qr.png")
+
         await message.answer_photo(
-            BufferedInputFile(buffer.read(), filename="qr.png"),
+            input_file,
             caption="✅ QR-kod tayyor!"
         )
     except Exception:
@@ -199,7 +209,8 @@ async def scan_prompt(message: Message):
 async def scan_qr(message: Message):
     photo = message.photo[-1]
 
-    if photo.file_size and photo.file_size > MAX_PHOTO_SIZE:
+    # Be robust if file_size is None
+    if (photo.file_size or 0) > MAX_PHOTO_SIZE:
         await message.answer("⚠️ Rasm hajmi juda katta (max 5MB). Kichikroq rasm yuboring.")
         return
 
@@ -207,19 +218,33 @@ async def scan_qr(message: Message):
         file = await bot.get_file(photo.file_id)
         downloaded = await bot.download_file(file.file_path)
 
-        image = Image.open(BytesIO(downloaded.read()))
+        # downloaded.read can be async or sync depending on aiogram version
+        data = None
+        if hasattr(downloaded, "read"):
+            read = downloaded.read
+            if asyncio.iscoroutinefunction(read):
+                data = await read()
+            else:
+                data = read()
+        else:
+            # downloaded might already be bytes
+            data = downloaded
+
+        image = Image.open(BytesIO(data))
         results = zxingcpp.read_barcodes(image)
 
         if not results:
             await message.answer("❌ Rasmdan QR-kod topilmadi. Aniqroq rasm yuboring.")
             return
 
-        result = results[0].text
+        # Some bindings return objects with different attributes
+        first = results[0]
+        result_text = getattr(first, 'text', None) or getattr(first, 'data', None) or str(first)
 
-        if URL_PATTERN.match(result):
-            await message.answer(format_warning(result))
+        if URL_PATTERN.match(result_text):
+            await message.answer(format_warning(result_text))
         else:
-            safe_result = html.escape(result)
+            safe_result = html.escape(result_text)
             await message.answer(f"✅ Skanerlash natijasi:\n<code>{safe_result}</code>")
 
     except Exception:
